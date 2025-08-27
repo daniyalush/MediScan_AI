@@ -1,0 +1,19 @@
+# Python cache / compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Dataset (too large to track on GitHub)
+Dataset2/
