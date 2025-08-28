@@ -4,5 +4,5 @@ pillow
 numpy
 pandas
 plotly
-PyTorch
+torch
 torchvision
