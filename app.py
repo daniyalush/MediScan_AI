@@ -1,51 +1,128 @@
 # app.py
 
 import streamlit as st
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import transforms
 from PIL import Image
 import numpy as np
 import pandas as pd
 import plotly.express as px
 
 # ----------------------
-# CONFIG
+# CONFIG: Image & Models
 # ----------------------
 IMG_SIZE = 128
-CATEGORIES = ["No Tumor", "Glioma", "Meningioma", "Pituitary"]
-MODEL_PATH = "brain_tumor_multiclass_model.h5"
+
+MODELS = {
+    "Brain Tumor": {
+        "path": "brain_tumor_model_weights.pth",  # weights only
+        "categories": ["No Tumor", "Glioma", "Meningioma", "Pituitary"],
+        "type": "brain"
+    },
+    "Lung Cancer": {
+        "path": "lung_cnn_model_weights.pth",  # weights only
+        "categories": ["Adenocarcinoma", "Large Cell Carcinoma", "Squamous Cell Carcinoma", "Normal"],
+        "type": "lung"
+    }
+}
 
 # ----------------------
-# LOAD MODEL
+# NAVBAR: Select Application
+# ----------------------
+app_choice = st.selectbox("Choose Application", list(MODELS.keys()))
+MODEL_PATH = MODELS[app_choice]["path"]
+CATEGORIES = MODELS[app_choice]["categories"]
+MODEL_TYPE = MODELS[app_choice]["type"]
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ----------------------
+# DEFINE MODEL CLASSES
+# ----------------------
+class BrainCNN(nn.Module):
+    def __init__(self, num_classes=4):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3)
+        self.pool = nn.MaxPool2d(2,2)
+        self.conv2 = nn.Conv2d(32, 64, 3)
+        self.conv3 = nn.Conv2d(64, 128, 3)
+        self.fc1 = nn.Linear(128*14*14, 128)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv1(x)))
+        x = self.pool(torch.relu(self.conv2(x)))
+        x = self.pool(torch.relu(self.conv3(x)))
+        x = torch.flatten(x, 1)
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+class LungCNN(nn.Module):
+    def __init__(self, num_classes=4):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3)
+        self.pool = nn.MaxPool2d(2,2)
+        self.conv2 = nn.Conv2d(32, 64, 3)
+        self.conv3 = nn.Conv2d(64, 128, 3)
+        self.fc1 = nn.Linear(128*14*14, 128)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv1(x)))
+        x = self.pool(torch.relu(self.conv2(x)))
+        x = self.pool(torch.relu(self.conv3(x)))
+        x = torch.flatten(x, 1)
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+# ----------------------
+# LOAD MODEL (weights only)
 # ----------------------
 @st.cache_resource
-def load_trained_model():
-    return load_model(MODEL_PATH)
+def load_trained_model(model_type, path, num_classes):
+    if model_type == "brain":
+        model = BrainCNN(num_classes=num_classes)
+    else:
+        model = LungCNN(num_classes=num_classes)
 
-model = load_trained_model()
+    model.load_state_dict(torch.load(path, map_location=DEVICE))
+    model.to(DEVICE)
+    model.eval()
+    return model
+
+model = load_trained_model(MODEL_TYPE, MODEL_PATH, len(CATEGORIES))
 
 # ----------------------
-# HELPERS
+# IMAGE PREPROCESS
 # ----------------------
-def preprocess_image(image: Image.Image):
-    img = image.convert("L").resize((IMG_SIZE, IMG_SIZE))
-    img = img_to_array(img)
-    img = np.expand_dims(img, axis=0) / 255.0
-    return img
+preprocess = transforms.Compose([
+    transforms.Grayscale(),
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+])
 
 def predict_image(image: Image.Image):
-    img = preprocess_image(image)
-    prediction = model.predict(img, verbose=0)
-    class_idx = np.argmax(prediction)
+    img_tensor = preprocess(image).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        output = model(img_tensor)
+        probs = F.softmax(output, dim=1).cpu().numpy()[0]
+    class_idx = int(np.argmax(probs))
     class_name = CATEGORIES[class_idx]
-    confidence = float(np.max(prediction)) * 100
-    return class_name, confidence, prediction[0]
-
+    confidence = float(np.max(probs)) * 100
+    return class_name, confidence, probs
 
 # ----------------------
 # CUSTOM STYLING
 # ----------------------
-st.set_page_config(page_title="Brain Tumor Classifier", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="MediScan AI", page_icon="🩺", layout="wide")
 st.markdown("""
     <style>
         .main { background: #f9fafb; }
@@ -63,7 +140,7 @@ if "history" not in st.session_state:
 # ----------------------
 # SIDEBAR: Scan History
 # ----------------------
-st.sidebar.title("📜 Scan History")
+st.sidebar.title("Scan History")
 if st.sidebar.button("🗑️ Clear History"):
     st.session_state.history = []
 
@@ -76,22 +153,18 @@ else:
 # ----------------------
 # UI HEADER
 # ----------------------
-st.title("🧠 Brain Tumor Classifier")
-st.markdown("<p style='text-align:center;'>Upload MRI scans to classify tumors using Deep Learning.</p>", unsafe_allow_html=True)
+st.title(f" {app_choice} Classifier")
+st.markdown(f"<p style='text-align:center;'>Upload medical scans to classify {app_choice.lower()} using Deep Learning.</p>", unsafe_allow_html=True)
 st.markdown("---")
 
 upload_type = st.radio("Choose input type:", ["📷 Single Image", "📂 Multiple Images"], horizontal=True)
-
-# ----------------------
-# STORE RESULTS
-# ----------------------
 results_data = []
 
 # ----------------------
 # SINGLE IMAGE MODE
 # ----------------------
 if upload_type == "📷 Single Image":
-    uploaded_file = st.file_uploader("Upload an MRI image...", type=["jpg","jpeg","png"])
+    uploaded_file = st.file_uploader("Upload an image...", type=["jpg","jpeg","png"])
     if uploaded_file:
         image = Image.open(uploaded_file)
         class_name, confidence, prediction = predict_image(image)
@@ -100,7 +173,7 @@ if upload_type == "📷 Single Image":
 
         col1, col2 = st.columns([1,2])
         with col1:
-            st.image(image, caption="🖼 Uploaded MRI", use_container_width=True)
+            st.image(image, caption="🖼 Uploaded Image", use_container_width=True)
             st.markdown("### 🔎 Prediction Result")
             st.success(f"**{class_name}** ({confidence:.2f}%)")
         with col2:
@@ -113,7 +186,7 @@ if upload_type == "📷 Single Image":
 # MULTIPLE IMAGES MODE
 # ----------------------
 elif upload_type == "📂 Multiple Images":
-    uploaded_files = st.file_uploader("Upload multiple MRI images...", type=["jpg","jpeg","png"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload multiple images...", type=["jpg","jpeg","png"], accept_multiple_files=True)
     if uploaded_files:
         progress = st.progress(0)
         for i, uploaded_file in enumerate(uploaded_files):
@@ -130,7 +203,6 @@ elif upload_type == "📂 Multiple Images":
             df = pd.DataFrame(results_data)
             st.subheader("📊 Batch Prediction Results")
             st.dataframe(df, use_container_width=True, height=400)
-
             csv = df.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Download Results as CSV", csv, "batch_results.csv", "text/csv")
 
@@ -140,20 +212,18 @@ elif upload_type == "📂 Multiple Images":
 if results_data:
     st.markdown("---")
     st.markdown("### 📊 Data Analysis & Visualization")
-
     df = pd.DataFrame(results_data)
 
-    # 1️⃣ Tumor Distribution Pie
+    # 1️⃣ Distribution Pie
     dist_df = df["Prediction"].value_counts().reset_index()
     dist_df.columns = ["Class", "Count"]
-    st.plotly_chart(px.pie(dist_df, names="Class", values="Count", title="Tumor Distribution"), width=True)
+    st.plotly_chart(px.pie(dist_df, names="Class", values="Count", title=f"{app_choice} Distribution"), width=True)
 
     # 2️⃣ Heat Map
     heat_df = df.pivot(index="File", columns="Prediction", values="Confidence (%)")
 
     # 3️⃣ Top Confident Predictions
     top_df = df.sort_values(by="Confidence (%)", ascending=False).head(10)
-
     col1, col2 = st.columns([1,2])
     with col1:
         st.plotly_chart(px.imshow(heat_df, text_auto=True, title="Heat Map"), width=True)
